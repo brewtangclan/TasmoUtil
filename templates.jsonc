@@ -1,0 +1,321 @@
+[
+    /* 
+        Configuration Templates for Tasmota Devices 
+        
+        I've added templates for what I use, how I use them. Feel free to replace these with your own, or just add your own to this list.
+    */
+    {
+        "name": "PWM Dimmer", /* Name displayed in the templates menu */
+        /* 
+            Each var defined here will prompt for values, and find/replace var['name'] with the entered value for each command defined below
+        */
+        "vars": [ 
+            { "name": "<DIMMER_NAME>", "prompt": "Dimmer Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        /* 
+            Each command listed below will be run in the order listed. 
+
+            The script will automatically wait 15 seconds after issuing a Restart or Reset command to allow time for the device to reboot, before sending the next command.
+            
+            Any commands that fail ( {"Command": "Unknown"} response ) are re-queued at the end. 
+            The script will loop over the re-queued commands until either all of them succeed (exit w/ success), or none succeed (exit w/ failure). 
+            This should allow for all commands to eventually get run, regardless of their order.
+
+            I like to start with Reset 4 just to be safe. Reset 5 may be better for some (using static IPs and other WiFi configurations).
+
+            My firmware builds include configuration settings for WiFi, MQTT, NTP, Timezone, and several SetOptions. 
+            They could just as easily be defined here instead, but this script will run faster if it doesn't have to send those commands.
+        */
+        "commands": [ 
+            "Reset 4", /*  */
+            "Template {\"NAME\":\"MJ-SD02\",\"GPIO\":[162,161,0,323,576,322,0,0,321,416,320,160,256,0],\"FLAG\":0,\"BASE\":73}",
+            "Module 0",
+            "Hostname <HOST_NAME>",
+            "FriendlyName <DIMMER_NAME>",
+            "DeviceName <DIMMER_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 dimmers",
+            "grouptopic2 tasmotas",
+            "Restart 1",
+            "SO34 0",
+            "SO85 1",
+            "SO87 1",
+            "DevGroupName <DEVGROUP_NAME>",
+            "switchmode1 1",
+            "switchmode2 2",
+            "switchmode3 2",
+            "PWMDimmerPWMs 2",
+            "Fade 1",
+            "Speed 10",
+            "Rule1 ON Power1#State DO var1 %value% ENDON ON Switch1#state DO var2 %value% ENDON ON Power1#State=0 DO publish stat/lsg_<DEVGROUP_NAME>/Override 0 ENDON ON Switch1#State=0 DO IF ((var3==0) AND (var4==0)) Power Toggle; var4 0 ENDIF ENDON ON Switch2#State=1 DO  IF (var1==0) Dimmer 25; CT 500; Power On; publish stat/lsg_<DEVGROUP_NAME>/Override 1 ELSEIF (var2==1) var4 1; CT 500; publish stat/lsg_<DEVGROUP_NAME>/Override 1 ELSE var3 1; Backlog Dimmer <; publish stat/lsg_<DEVGROUP_NAME>/Override 1 ENDIF ENDON ON Switch2#State=0 DO if (var3==1) Dimmer !; var3 0 ENDIF ENDON ON Switch3#State=1 DO IF (var1==0) Dimmer 100; CT 153; Power On; publish stat/lsg_<DEVGROUP_NAME>/Override 1 ELSEIF (var2==1) var4 1; CT 153; publish stat/lsg_<DEVGROUP_NAME>/Override 1 ELSE var3 1; Backlog Dimmer >; publish stat/lsg_<DEVGROUP_NAME>/Override 1 ENDIF ENDON ON Switch3#State=0 DO IF (var3==1) Dimmer !; var3 0 ENDIF ENDON",
+            "rule1 1",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "Switchbot Color Bulb",
+        "vars": [
+            { "name": "<BULB_NAME>", "prompt": "Bulb Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "template {\"NAME\":\"Switchbot Color Bulb\",\"GPIO\":[0,0,0,0,9128,9088,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],\"FLAG\":0,\"BASE\":1}",
+            "module 0",
+            "ntpserver1 10.13.37.253",
+            "TimeDST 0,2,3,1,2,-240",
+            "TimeSTD 0,1,11,1,2,-300",
+            "timezone 99",
+            "DeviceName <BULB_NAME>",
+            "Hostname <HOST_NAME>",
+            "FriendlyName <BULB_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 bulbs",
+            "grouptopic2 tasmota32c3s",
+            "SO85 1",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Restart 1",
+            "SO17 1",
+            "SO20 1",
+            "SO34 0",
+            "SO37 25",
+            "SO53 1",
+            "SO56 1",
+            "SO57 1",
+            "SO59 1",
+            "SO65 1",
+            "PowerOnState 0",
+            "Fade 1",
+            "Speed 10",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule1 3",
+            "SetSensor127 0",
+            "PowerOnState 3",
+            "PowerRetain On",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "Lohas ZN033 RGBCCT Bulb",
+        "vars": [
+            { "name": "<BULB_NAME>", "prompt": "Bulb Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "template {\"NAME\":\"Lohas ZN033 RGBCCT\",\"GPIO\":[0,0,0,0,38,37,0,0,41,39,40,0,0],\"FLAG\":0,\"BASE\":18}",
+            "module 0",
+            "DeviceName <BULB_NAME>",
+            "Hostname <HOST_NAME>",
+            "FriendlyName <BULB_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 bulbs",
+            "grouptopic2 tasmotas",
+            "SO85 1",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Restart 1",
+            "SO34 0",
+            "Fade 1",
+            "Speed 10",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule3 1",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "Treatlife Fan/Light Controller",
+        "vars": [
+            { "name": "<CONTROLLER_NAME>", "prompt": "Fan/Light Controller Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<FAN_DEVGROUP_NAME>", "prompt": "Fan Device Group Name: " },
+            { "name": "<LIGHT_DEVGROUP_NAME>", "prompt": "Light Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Module 54",
+            "Restart 1",
+            "SO97 1",
+            "TuyaMCU 11,1",
+            "TuyaMCU 12,9",
+            "TuyaMCU 21,10",
+            "Restart 1",
+            "LedTable 0",
+            "DimmerRange 10,1000",
+            "SO68 0",
+            "Hostname <HOST_NAME>",
+            "FriendlyName <CONTROLLER_NAME>",
+            "DeviceName <CONTROLLER_NAME>",
+            "Topic <HOST_NAME>",
+            "GroupTopic1 fandimmers",
+            "GroupTopic2 tasmotas",
+            "SO85 1",
+            "SO88 1",
+            "DevGroupName1 <FAN_DEVGROUP_NAME>",
+            "DevGroupTie1 1",
+            "DevGroupName2 <LIGHT_DEVGROUP_NAME>",
+            "DevGroupTie2 2",
+            "Restart 1",
+            "Rule1 ON TuyaReceived#Data=55AA03070005030400010016 DO publish2 stat/%topic%/speed 3,0 ENDON ON TuyaReceived#Data=55AA03070005030400010117 DO publish2 stat/%topic%/speed 3,1 ENDON ON TuyaReceived#Data=55AA03070005030400010218 DO publish2 stat/%topic%/speed 3,2 ENDON ON TuyaReceived#Data=55AA03070005030400010319 DO publish2 stat/%topic%/speed 3,3 ENDON",
+            "Rule1 1",
+            "Rule2 ON Mqtt#Connected DO backlog Subscribe RemoteDim, cmnd/%topic%/DimSet; Subscribe AutoDim, cmnd/lsg_<LIGHT_DEVGROUP_NAME>/Dimmer ENDON ON Event#RemoteDim DO var1=%value%; Dimmer %value% ENDON ON Event#AutoDim DO var1=%value%; Dimmer %value% ENDON ON Dimmer#State!=%var1% DO publish stat/lsg_<LIGHT_DEVGROUP_NAME>/Override 1 ENDON ON Power2#State=0 DO publish stat/lsg_<LIGHT_DEVGROUP_NAME>/Override 0 ENDON",
+            "Rule2 1",
+            "SO34 0"
+        ]
+    },
+    {
+        "name": "Tessan STD02 3-way Dimmer",
+        "vars": [
+            { "name": "<DIMMER_NAME>", "prompt": "Dimmer Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Template {\"NAME\":\"Tessan-STD02\",\"GPIO\":[0,2272,0,2304,0,0,0,0,0,0,0,0,0,0],\"FLAG\":0,\"BASE\":54}",
+            "Module 0",
+            "SO97 1",
+            "Restart 1",
+            "TuyaMCU 11,1",
+            "TuyaMCU 21,2",
+            "Restart 1",
+            "Hostname <HOST_NAME>",
+            "FriendlyName <DIMMER_NAME>",
+            "DeviceName <DIMMER_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 dimmers",
+            "grouptopic2 tasmotas",
+            "Restart 1",
+            "SO34 0",
+            "SO85 1",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Fade 1",
+            "Speed 10",
+            "Rule1 ON Mqtt#Connected DO backlog Subscribe RemoteDim, cmnd/%topic%/DimSet; Subscribe AutoDim, cmnd/lsg_<DEVGROUP_NAME>/Dimmer ENDON ON Event#RemoteDim DO var1=%value%; Dimmer %value% ENDON ON Event#AutoDim DO var1=%value%; Dimmer %value% ENDON ON Dimmer#State!=%var1% DO publish stat/lsg_<DEVGROUP_NAME>/Override 1 ENDON ON Power1#State=0 DO publish stat/lsg_<DEVGROUP_NAME>/Override 0 ENDON",
+            "rule1 1",
+            "DimmerRange 20,255",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "MJ Switch (Bypassed)",
+        "vars": [
+            { "name": "<SWITCH_NAME>", "prompt": "Switch Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Template {\"NAME\":\"MJ-S01 Switch\",\"GPIO\":[0,0,0,0,57,56,0,0,21,9,0,0,0],\"FLAG\":0,\"BASE\":18}",
+            "Module 0",
+            "DeviceName <BULB_NAME>",
+            "FriendlyName <BULB_NAME>",
+            "Hostname <HOST_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 switches",
+            "grouptopic2 tasmotas",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Restart 1",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule3 1",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "MJ Switch (No Bypass)",
+        "vars": [
+            { "name": "<SWITCH_NAME>", "prompt": "Switch Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Template {\"NAME\":\"MJ-S01 Switch\",\"GPIO\":[0,0,0,0,57,56,0,0,21,9,0,0,0],\"FLAG\":0,\"BASE\":18}",
+            "Module 0",
+            "DeviceName <SWITCH_NAME>",
+            "FriendlyName <SWITCH_NAME>",
+            "Hostname <HOST_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 switches",
+            "grouptopic2 tasmotas",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Restart 1",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule3 1",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "Lohas ZN070 CCT Bulb",
+        "vars": [
+            { "name": "<BULB_NAME>", "prompt": "Bulb Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Template {\"NAME\":\"Lohas ZN070 CCT\",\"GPIO\":[0,0,0,0,0,0,0,0,38,0,37,0,0],\"FLAG\":0,\"BASE\":18}",
+            "Module 0",
+            "DeviceName <BULB_NAME>",
+            "FriendlyName <BULB_NAME>",
+            "Hostname <HOST_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 bulbs",
+            "grouptopic2 tasmotas",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Restart 1",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule3 1",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "Jetstream RGBW Bulb",
+        "vars": [
+            { "name": "<BULB_NAME>", "prompt": "Bulb Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Template {\"NAME\":\"Jetstream MA19CL\",\"GPIO\":[0,0,0,0,37,0,0,0,141,142,140,0,0],\"FLAG\":0,\"BASE\":18}",
+            "Module 0",
+            "DeviceName <BULB_NAME>",
+            "FriendlyName <BULB_NAME>",
+            "Hostname <HOST_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 bulbs",
+            "grouptopic2 tasmotas",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule3 1",
+            "Restart 1"
+        ]
+    },
+    {
+        "name": "KMC 4-Port Plug",
+        "vars": [
+            { "name": "<PLUG_NAME>", "prompt": "Plug Name: " },
+            { "name": "<HOST_NAME>", "prompt": "Hostname: " },
+            { "name": "<DEVGROUP_NAME>", "prompt": "Device Group Name: " }
+        ],
+        "commands": [
+            "Reset 4",
+            "Template {\"NAME\":\"KMC 3 Relay\",\"GPIO\":[0,56,0,0,133,132,0,0,130,22,23,21,17],\"FLAG\":0,\"BASE\":36}",
+            "Module 0",
+            "DeviceName <PLUG_NAME>",
+            "FriendlyName <PLUG_NAME>",
+            "Hostname <HOST_NAME>",
+            "topic <HOST_NAME>",
+            "grouptopic1 plugs",
+            "grouptopic2 tasmotas",
+            "DevGroupName <DEVGROUP_NAME>",
+            "Rule3 ON Wifi#Disconnected DO Restart 1 ENDON",
+            "Rule3 1",
+            "Restart 1"
+        ]
+    }
+]
