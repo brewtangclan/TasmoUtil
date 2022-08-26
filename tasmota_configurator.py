@@ -36,21 +36,21 @@ class TasmotaConfigurator:
             return self.webcommand( ip, command, retry_count+1 )
     
     def config_single_interactive( self ) -> dict:
-        logHead("\n---------------------------------------------------------")
-        logHead("-----------  Tasmota Configuration Generator  -----------")
-        logHead("---------------------------------------------------------\n")
-        for i in range(len(templates)):
+        self.logHead("\n---------------------------------------------------------")
+        self.logHead("-----------  Tasmota Configuration Generator  -----------")
+        self.logHead("---------------------------------------------------------\n")
+        for i in range(len(self.templates)):
             print("[%s] %s" % (self.fmtInput(i), self.templates[i]['name']))
         templateIdx = input(self.fmtInput("\nEnter the type of device to configure: "))
-        template = templates[int(templateIdx)].copy()
+        template = self.templates[int(templateIdx)].copy()
         
         ip = input(self.fmtInput("\nEnter device's IP Address: "))
         
         self.logSend("Connecting to %s..." % ip)
         resp = self.webcommand(ip, "friendlyname")
         if "Command" in resp:
-            return { "success": False, "error": fmtError("Device did not recognize FriendlyName command. Is it running a Minimal firmware?") }
-        logRecv("Connected to %s (%s).\n" % ( ip, resp['FriendlyName1'] ) )
+            return { "success": False, "error": self.fmtError("Device did not recognize FriendlyName command. Is it running a Minimal firmware?") }
+        self.logRecv("Connected to %s (%s).\n" % ( ip, resp['FriendlyName1'] ) )
 
         for var in template['vars']:
             find = var['name']
@@ -58,10 +58,10 @@ class TasmotaConfigurator:
             for i in range(len(template['commands'])):
                 template['commands'][i] = template['commands'][i].replace(find, repl)
 
-        logHead("\n---------------------------------------------------------\n")
+        self.logHead("\n---------------------------------------------------------\n")
 
         retry_commands = []
-        input(fmtInput("Press Enter to send the configuration (%s commands), or CTRL+C to cancel. " % len(template['commands'])))
+        input(self.fmtInput("Press Enter to send the configuration (%s commands), or CTRL+C to cancel. " % len(template['commands'])))
         for c in template['commands']:
             self.logSend("Sending command: %s" % c)
             resp = self.webcommand(ip, c)
