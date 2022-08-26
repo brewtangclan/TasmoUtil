@@ -2,8 +2,6 @@ import requests, urllib, traceback, json, time, socket, sys
 from datetime import datetime, timedelta
 from jsonc_parser.parser import JsoncParser
 
-TasmotaConfigurator().config_single_interactive()
-
 class TasmotaConfigurator:
     def __init__(self):
         self.HEADER = '\033[95m'
@@ -108,3 +106,4 @@ class TasmotaConfigurator:
     def fmtInput( self, message: str ) -> str: return "%s%s%s" % ( self.OKCYAN, message, self.ENDC )
     def fmtError( self, message: str ) -> str: return "%s%s%s" % ( self.FAIL, message, self.ENDC )
     
+TasmotaConfigurator().config_single_interactive()
