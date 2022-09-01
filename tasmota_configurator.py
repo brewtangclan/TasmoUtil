@@ -1,109 +1,364 @@
-import requests, urllib, traceback, json, time, socket, sys
+import requests, urllib, traceback, json, time, socket, sys, subprocess, os
+import asyncio, aiohttp, functools, logging, typing, copy
 from datetime import datetime, timedelta
 from jsonc_parser.parser import JsoncParser
+from typing import List
+from logging.handlers import TimedRotatingFileHandler
+from tabulate import tabulate
+from mergedeep import merge
+import ipaddress
 
+logging.getLogger("asyncio").setLevel(logging.INFO)
+
+######################
+### Set up logging ###
+######################
+formatter = logging.Formatter('[%(asctime)s][%(filename)s:%(lineno)04d][%(levelname)-4s] %(message)s')
+logging.addLevelName(logging.DEBUG, 'DBG')
+logging.addLevelName(logging.WARNING, 'WARN')
+logging.addLevelName(logging.ERROR, 'ERR')
+logging.addLevelName(logging.CRITICAL, 'CRIT')
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+file_handler = TimedRotatingFileHandler('tasmota_configurator.log', when="midnight", interval=1)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+class Template:
+    def __init__( self, client, template_path ):
+        self.client = client
+        self.name: str = os.path.splitext(os.path.basename(template_path))[0]
+        with open(template_path, 'r') as fp:
+            self.config = json.load(fp) 
+            
+class Device:
+    def __init__( self, client, deviceDict ):
+        self.client = client
+        self.ip: str = deviceDict['ip']
+        self.enabled: bool = deviceDict['enabled']
+        self.template: Template = self.client.get_template( deviceDict['template_name'] )
+        self.vars: dict = deviceDict['vars']
+        self.name: str = self.vars.get("device_name")
+        self.hostname: str = self.vars.get("host_name")
+        self.devgroup: str = self.vars.get("devgroup_name")
+        self.rules: dict = deviceDict.get("rules", {})
+        self.overrides: dict = deviceDict.get('config_overrides', {})
+        self.config: dict = {}
+        self.config_filepath: str = None 
+        self.generate_config()
+    
+    @property
+    def valid( self ):
+        return bool( self.enabled and self.template is not None )
+
+    def generate_config( self ) -> bool:
+        if not self.valid: return False
+        # Apply the device's vars
+        config = copy.deepcopy(self.template.config)        
+        config['device_group_topic'][0] = self.devgroup
+        config['devicename'] = self.name
+        config['hostname'] = self.hostname
+        names = [ self.name ]
+        while len(names) < len(config['friendlyname']): names.append("")
+        config['friendlyname'] = names
+        # Enable and overwrite any rules defined at the device level
+        for key in self.rules.keys():
+            ruleIdx = int(key[-1])-1
+            config['rule_enabled'][key] = 1
+            config['rules'][ruleIdx] = self.rules[key]        
+        # Merge the device's overrides into the config, and store the config
+        self.config = merge({}, config, self.overrides )        
+        return True
+
+    async def save_config( self ) -> bool:
+        if not self.valid or self.config == {}:
+            return False
+        self.config_filepath = os.path.join(self.client.device_dir, "%s.json" % self.ip)
+        with open(self.config_filepath, 'w') as f:
+            json.dump( self.config, f, indent=4 )
+        return True
+
+    async def apply_config( self ) -> dict:                
+        if not await self.save_config(): 
+            return { "ip": self.ip, "hostname": self.hostname, "success": False, "details": "aborted - failed to save config" }
+        logging.info("Applying config JSON for %s to %s...", self.name, self.ip )
+        args = [ 'python3', 'decode-config.py', '--no-extension', '-s', self.ip, '--restore-file', self.config_filepath ]
+        logging.debug("Executing: %s", " ".join(args))
+        output = await self.client.run_blocking( subprocess.run, args, capture_output=True, text=True )
+        output = output.stderr if output.stdout == '' else output.stdout        
+        results = " ".join( output.split("\n")[1:])
+        success = bool( "Restore successful" in results )
+        return { "ip": self.ip, "hostname": self.hostname, "success": success, "details": results }
+
+    async def is_online( self ) -> bool:
+        return await self.client.host_online(self.ip)
+    
 class TasmotaConfigurator:
-    def __init__(self):
-        self.HEADER = '\033[95m'
-        self.OKBLUE = '\033[94m'
-        self.OKCYAN = '\033[96m'
-        self.OKGREEN = '\033[92m'
-        self.WARNING = '\033[93m'
-        self.FAIL = '\033[91m'
-        self.ENDC = '\033[0m'
-        self.BOLD = '\033[1m'
-        self.UNDERLINE = '\033[4m'
-        self.templates = JsoncParser.parse_file("./templates.jsonc")
+    def __init__(self, **kwargs):
+        self.args = kwargs.get("args")
+        self.listed_devices: list = kwargs.get("devices")        
+        self.template_dir = os.path.join( os.getcwd(), "template_configs")
+        self.device_dir = os.path.join( os.getcwd(), "device_configs")
+        self.templates: List[Template] = []
+        for filename in os.listdir(self.template_dir):
+            if os.path.splitext(filename)[-1].lower() == '.json':
+                self.templates.append( 
+                    Template(self, os.path.join(self.template_dir, filename) )
+                ) 
+        self.devices: List[Device] = []
+        for d in self.listed_devices:
+            self.devices.append( Device( self, d ) )
+        self.selected_devices: List[Device] = []
 
-    def webcommand(self, ip: str, command: str, retry_count = 0) -> dict:
-        if retry_count > 5:
+        self.restart_delay = kwargs.get("restart_delay", 15)
+        self.reset_delay = kwargs.get("reset_delay", 30)
+        self.upgrade_delay = kwargs.get("upgrade_delay", 60)
+        self.max_retries = kwargs.get("max_retries", 5)
+        self.num_threads = kwargs.get("num_threads", 4)
+        self.command_delay = kwargs.get("seconds_between_commands", 15)
+
+        self.cmdline = {
+            'init': {
+                'desc': 'Scan your network for devices, fetch their current configurations, and pre-populate your devices.jsonc'
+                , 'func': self.scan_devices
+            },
+            'get-configs': {
+                'desc': 'Fetch configurations for all devices listed in devices.jsonc using decode-config'
+                , 'func': self.fetch_device_configs
+            }, 'deploy': {
+                'desc': 'Deploy configuration(s) to the device(s) of your choice'
+                , 'func': self.multi_deploy
+            }, 'deploy-all': {
+                'desc': 'Deploy configurations to all enabled devices in devices.jsonc'
+                , 'func': self.deploy_all
+            }
+        }
+        asyncio.run( self.run() )
+
+    async def run( self ):
+        if len(self.args) == 1:
+            await self.print_command_syntax("Missing argument.")
+        elif self.args[1] in self.cmdline.keys():
+            await self.cmdline[self.args[1]]['func']()
+        else:
+            await self.print_command_syntax("Invalid argument.")
+    
+    async def print_command_syntax( self, message=None ):
+        if message: print(message)
+        print("Usage:")
+        for switch in self.cmdline:
+            print("%s %s\n\t%s" % ( os.path.basename(__file__), switch, self.cmdline[switch]['desc'] ) )
+
+
+    def input( self, message: str ) -> str: 
+        return input( "%s%s%s" % ( '\033[96m', message, '\033[0m' ) )    
+
+    def get_template(self, template_name: str) -> Template:
+        for t in self.templates:
+            if t.name == template_name:
+                return t
+        return None
+
+    def get_device(self, ip: str ) -> Device:
+        for d in self.devices:
+            if d.ip == ip and d.enabled:
+                return d
+        return None
+
+    async def gather_tasks(self, *tasks):
+        semaphore = asyncio.Semaphore(self.num_threads)
+        async def sem_task(task):
+            async with semaphore:
+                return await task
+        return await asyncio.gather(*(sem_task(task) for task in tasks), return_exceptions=True)
+
+    async def run_blocking(self, blocking_func: typing.Callable, *args, **kwargs) -> typing.Any:
+        """Runs a blocking function in a non-blocking way"""
+        func = functools.partial(blocking_func, *args, **kwargs) # `run_in_executor` doesn't support kwargs, `functools.partial` does
+        return await asyncio.get_event_loop().run_in_executor(None, func)
+
+    async def host_online( self, ip: str ) -> bool:
+        return await self.run_blocking( self.host_online_synch, ip )
+
+    def host_online_synch( self, ip: str) -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        try:
+            s.connect((ip, 80))
+            retval=True
+        except:
+            retval=False
+        s.close() 
+        return retval
+
+    async def webcommand( self, ip: str, command: str, retry_count = 0) -> dict:
+        if retry_count > self.max_retries:
             raise Exception("Failed to send command %s to %s after 5 retries" % ( command, ip ) )
         url = "http://%s/cm?cmnd=%s" % ( ip, urllib.parse.quote_plus(command) )
+        conn = aiohttp.TCPConnector( family=socket.AF_INET, ssl=False )
         try:
-            r = requests.get(url, timeout=10)
-            return r.json()
-        except requests.exceptions.ConnectionError:
-            self.logWarn(" Request to %s failed after 10 seconds (retry=%s), retrying..." % ( url, retry_count ) )
-            return self.webcommand( ip, command, retry_count+1 )
-        except requests.exceptions.ReadTimeout:
-            self.logWarn(" Request to %s failed after 10 seconds (retry=%s), retrying..." % ( url, retry_count ) )
-            return self.webcommand( ip, command, retry_count+1 )
-        except socket.timeout:
-            self.logWarn(" Request to %s failed after 10 seconds (retry=%s), retrying..." % ( url, retry_count ) )
-            return self.webcommand( ip, command, retry_count+1 )
+            async with aiohttp.ClientSession(connector=conn) as session:
+                async with session.get(url) as resp:
+                    return await resp.json()
+        except json.decoder.JSONDecodeError:
+            # Kludge for the 1/60 tasmota devices I have that returns malformed JSON for the `DevGroupStatus` command
+            # For shame!
+            jsonStr = await resp.text()
+            return json.loads("%s}" % jsonStr)
+        except ( 
+            requests.exceptions.ConnectionError
+            , requests.exceptions.ReadTimeout
+            , socket.timeout 
+            , asyncio.exceptions.TimeoutError
+            , aiohttp.client_exceptions.ClientOSError
+            , aiohttp.client_exceptions.ServerDisconnectedError
+            , aiohttp.client_exceptions.ClientConnectorError
+        ):
+            logging.debug(" Request to %s failed after 10 seconds (retry=%s), retrying...", url, retry_count )
+            return await self.webcommand( ip, command, retry_count+1 )
+
+    async def multi_deploy( self ):
+        indexes = []
+        for i in range(len(self.devices)):
+            indexes.append("[%s] %s (%s)" % ( i, self.devices[i].hostname, self.devices[i].ip))
+        print("%s\n" % "\n".join(indexes))
+        tasks = []
+        idx = ""
+        while True:
+            idx = self.input("Enter a device to deploy, or enter 'done': ")
+            if idx == 'done':
+                break
+            tasks.append(self.devices[int(idx)].apply_config() )
+        data = await self.gather_tasks(*tasks)
+        print(tabulate([x.values() for x in data], data[0].keys()))
+
+    async def deploy_all( self ):
+        tasks = []
+        for d in self.devices:
+            tasks.append( d.apply_config() )
+        data = await self.gather_tasks(*tasks)
+        print(tabulate([x.values() for x in data], data[0].keys()))
+
+    async def fetch_device_configs( self ):
+        tasks = []
+        for d in self.devices:
+            tasks.append( self.export_config( d.ip ) )
+        data = await self.gather_tasks(*tasks)
+        print(tabulate([x.values() for x in data], data[0].keys()))
+    
+    async def export_config( self, ip: str ) -> dict:
+        """ Exports the device's *current* configuration using decode-config """
+        if not await self.host_online(ip):
+            return {'ip': ip, 'success': False, 'details':"Device is offline"}
+        json_path = os.path.join( self.device_dir, "%s.json" % ip )
+        logging.debug("Exporting device config JSON for %s to %s...", ip, json_path )        
+        args = [ 'python3', 'decode-config.py', '-s', ip, '--json-indent', '4', '-t', 'json', '--no-extension', '-o', json_path ]
+        logging.debug("Executing: %s", " ".join(args))
+        output = await self.run_blocking( subprocess.run, args, capture_output=True, text=True )
+        output = output.stderr if output.stdout == '' else output.stdout        
+        results = " ".join( output.split("\n")[1:])
+        success = bool( "Backup successful" in results )
+        return {'ip': ip, 'success': success, 'details': results}
+
+    async def scan_device( self, ip: str ) -> dict:
+        # Don't bother if the host is offline
+        if not await self.host_online( ip ):
+            logging.debug("%s is offline", ip)
+            return {'success': False, 'ip': ip, 'error': 'Offline'}
+        
+        # Run "Status 0" web command to get device/host names / confirm it is a tasmota device
+        try:
+            status = await self.webcommand(ip, "Status 0")
         except:
-            print(self.fmtError(traceback.format_exc()))
-            return self.webcommand( ip, command, retry_count+1 )
-    
-    def config_single_interactive( self ) -> dict:
-        self.logHead("\n---------------------------------------------------------")
-        self.logHead("-----------  Tasmota Configuration Generator  -----------")
-        self.logHead("---------------------------------------------------------\n")
-        for i in range(len(self.templates)):
-            print("[%s] %s" % (self.fmtInput(i), self.templates[i]['name']))
-        templateIdx = input(self.fmtInput("\nEnter the type of device to configure: "))
-        template = self.templates[int(templateIdx)].copy()
+            logging.debug("%s is not a tasmota device.", ip)
+            return {'success': False, 'ip': ip, 'error': 'Not tasmota'}
+        if 'Status' in status and 'DeviceName' in status['Status']:
+            name = status['Status']['DeviceName']
+        else: name = '(unknown)'
+        if 'StatusNET' in status and 'Hostname' in status['StatusNET']:
+            hostname = status['StatusNET']['Hostname']
+        else: hostname = '(unknown)'
+        config_stub = """
+    {
+        "ip": "%s",
+        "enabled": false, /* Set this to true once configured */
+        "template_name": "", /* set this to a filename in the template_configs directory, without the .json extension */
+        "vars": {
+            "device_name": "%s",
+            "host_name": "%s",
+            "devgroup_name": "" /* Leave this blank if not using device groups */
+        },
+        "rules": { 
+            /* (optional) Device-specific rules - See devices.jsonc for details. */
+        },
+        "config_overrides": { 
+            /* (optional) Device-specific configuration overrides - See devices.jsonc.example for details. */
+        }
+    } """ % ( ip, name, hostname )
+        # Export the device's current configuration
+        export = await self.export_config( ip )
+
+        return {
+            'success': True
+            , 'ip': ip
+            , 'name': name
+            , 'hostname': hostname
+            , 'config_stub': config_stub
+            , 'config_exported': export['success']
+        }
+
+    async def scan_devices( self ):
+        if len(self.devices) != 0:
+            print("Error: You already have data in your devices.jsonc file. Rename that file and run this again to scan.")
+            return
+        self.max_retries = 1
+        cidr = self.input("Enter the subnet of your Tasmota devices (e.g., '192.168.1.0/24'): ")
+        net = ipaddress.IPv4Network(cidr)
+        ips = [str(ip) for ip in net]
+        print("Scanning %s to %s..." % ( ips[0], ips[-1]))
+        tasks = []
+        for ip in ips:
+            tasks.append( self.scan_device( ip ) )
+        data = await self.gather_tasks(*tasks)
+        # Drop offline/non-Tasmota devices from the list
+        for dev in list(data):
+            if not dev['success']:
+                data.remove(dev)
+        # Sort by IP
+        data.sort(key = lambda x: [int(y) for y in x['ip'].split('.')] )
+        # combine the config stubs for devices.jsonc
+        filepath = os.path.join(os.getcwd(), "devices.jsonc")
+        with open(filepath, 'w') as f:
+            f.write("[\n%s\n]" % ",".join([x['config_stub'] for x in data]))
+        for i in range(len(data)):
+            del data[i]['config_stub']
         
-        ip = input(self.fmtInput("\nEnter device's IP Address: "))
+        print(tabulate([x.values() for x in data], data[0].keys()))
+        return
+
+if __name__ == '__main__':
+    start = datetime.now()
+    try:
+        devices = JsoncParser.parse_file("./devices.jsonc")
+    except:
+        devices = []
+
+    TasmotaConfigurator( 
+        devices = devices
+        , restart_delay = 10
+        , reset_delay = 15
+        , upgrade_delay = 30
+        , max_retries = 5
+        , num_threads = 32
+        , seconds_between_commands = 0
+        , args = sys.argv
+    )
+    
+    end = datetime.now()
+    print("Script completed in %s seconds." % (end-start).total_seconds())
         
-        self.logSend("Connecting to %s..." % ip)
-        resp = self.webcommand(ip, "friendlyname")
-        if "Command" in resp:
-            return { "success": False, "error": self.fmtError("Device did not recognize FriendlyName command. Is it running a Minimal firmware?") }
-        self.logRecv("Connected to %s (%s).\n" % ( ip, resp['FriendlyName1'] ) )
-
-        for var in template['vars']:
-            find = var['name']
-            repl = input(self.fmtInput(var['prompt']))
-            for i in range(len(template['commands'])):
-                template['commands'][i] = template['commands'][i].replace(find, repl)
-
-        self.logHead("\n---------------------------------------------------------\n")
-
-        retry_commands = []
-        input(self.fmtInput("Press Enter to send the configuration (%s commands), or CTRL+C to cancel. " % len(template['commands'])))
-        for c in template['commands']:
-            self.logSend("Sending command: %s" % c)
-            resp = self.webcommand(ip, c)
-            if 'Command' in resp and resp['Command'] == 'Unknown':
-                self.logWarn("   Device did not recognize command %s; will retry later." % c)
-                retry_commands.append(c)
-            self.logRecv(" Response: %s" % json.dumps(resp) )
-            if "Restart" in resp.keys():
-                self.logBold("Waiting 15s for device to reboot...")
-                time.sleep(15)
-            elif "Reset" in resp.keys():
-                self.logBold("Waiting 15s for device to reset...")
-                time.sleep(15)
-            
-        while( len(retry_commands) > 0 ):
-            commands = retry_commands.copy()
-            retry_commands = []
-            retry_successes = 0
-            for c in commands:
-                self.logSend("Re-sending command: %s" % c)
-                resp = self.webcommand(ip, c)
-                if 'Command' in resp and resp['Command'] == 'Unknown':
-                    self.logWarn("   Device still did not recognize command %s; will retry later." % c)
-                    retry_commands.append(c)
-                else:
-                    retry_successes += 1
-                    self.logRecv(" Response: %s" % json.dumps(resp) )
-                    self.webcommand(ip, "Restart 1")
-                    self.logBold("Waiting 15s for device to reboot...")
-                    time.sleep(15)
-            if retry_successes == 0:
-                return { "success": False, "error": fmtError("Error: unable to run the following commands:\n%s" % "\n".join(retry_commands)) }
-
-        self.logBold("Done!")
-        return { "success": True }
-    
-    def logSend( self, message: str ): print("%s%s%s" % ( self.OKGREEN, message, self.ENDC ) )
-    def logRecv( self, message: str ): print("%s%s%s" % ( self.OKBLUE, message, self.ENDC ) )
-    def logWarn( self, message: str ): print("%s%s%s" % ( self.WARNING, message, self.ENDC ) )
-    def logHead( self, message: str ): print("%s%s%s" % ( self.HEADER, message, self.ENDC ) )
-    def logBold( self, message: str ): print("%s%s%s" % ( self.BOLD, message, self.ENDC ) )
-    def fmtInput( self, message: str ) -> str: return "%s%s%s" % ( self.OKCYAN, message, self.ENDC )
-    def fmtError( self, message: str ) -> str: return "%s%s%s" % ( self.FAIL, message, self.ENDC )
-    
-TasmotaConfigurator().config_single_interactive()

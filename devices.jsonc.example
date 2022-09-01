@@ -1,0 +1,35 @@
+[
+    /* Tasmota device list */
+    
+    {   /* Example device: */
+        /* (required) Device's IP address (technically hostname should work too) */
+        "ip": "10.1.1.15", 
+        
+        /* (required) When set to false, the script won't apply configs or send commands to this device. However, scan commands will still query it. */
+        "enabled": true,
+        
+        /* (required) Must match a template filename (without extension) in the template_configs folder */
+        "template_name": "PWM_Dimmer",
+        
+        /* (required) "Standard" configuration variables */
+        "vars": { 
+            "device_name": "Office Bulb", /* Used as DeviceName and FriendlyName */
+            "host_name": "office_bulb", /* Used as Hostname and topic*/
+            "devgroup_name": "office" /* Used as DevGroupName1, set to "" if not using device groups */
+        },
+
+        /* (optional) Device-specific rules. Any rules listed here will be merged into the template and enabled */
+        "rules": {
+            # Valid keys: Rule1, Rule2, Rule3
+            "Rule1": "ON System#Boot DO Var1 0 ENDON"
+        }, 
+
+        /* (optional) Device-specific configuration overrides to be merged into the template. Must match structure of template JSON file */
+        "config_overrides": {
+            "device_group_tie": [2,1,3,4],
+            "flag": {
+                "mqtt_power_retain": 0
+            }
+        }
+    }
+]
