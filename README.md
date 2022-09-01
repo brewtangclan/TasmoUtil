@@ -1,5 +1,5 @@
 # tasmota-config-generator
-A rudimentary tool to configure your Tasmota devices based on configurable templates. Will eventually be able to batch-configure all your devices in one shot.
+A rudimentary tool to configure your Tasmota devices based on configurable templates. 
 
 ## Setup:
 - `pip install -r requirements.txt`
