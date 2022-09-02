@@ -10,8 +10,13 @@ Uses https://github.com/tasmota/decode-config to export/import device configurat
 - Update `devices.jsonc` to map your templates to your devices, and enable those devices.
 
 ## Usage:
-* `python3 tasmota_configurator.py scan`: Scan your network for tasmota devices. If `devices.jsonc` doesn't exist or doesn't have any data, it will be created/populated with devices found in the scan. Otherwise it will show only devices not listed in `devices.jsonc` and print JSON that you can add to `devices.jsonc`.
-* `python3 tasmota_configurator.py backup` Export fresh device configs for devices listed in `devices.jsonc`
-* `python3 tasmota_configurator.py deploy`: Deploy configs to the device(s) of your choice
-* `python3 tasmota_configurator.py command`: Run a command against the device(s) of your choice
-* `python3 tasmota_configurator.py devgroups`: Queries device group status for devices listed in `devices.jsonc` and checks for devices that don't see all other members in that group
+* `python3 tasmota_configurator.py scan`
+  * Scan your network for tasmota devices. If `devices.jsonc` doesn't exist or doesn't have any data, it will be created/populated with devices found in the scan. Otherwise it will show only devices not listed in `devices.jsonc` and print JSON that you can add to `devices.jsonc`.
+* `python3 tasmota_configurator.py backup` 
+  * Export fresh device configs for devices listed in `devices.jsonc`
+* `python3 tasmota_configurator.py deploy`
+  * Deploy configs to the device(s) of your choice
+* `python3 tasmota_configurator.py command`
+  * Run a command against the device(s) of your choice
+* `python3 tasmota_configurator.py devgroups`
+  * Queries device group status for devices listed in `devices.jsonc` and checks for devices that don't see all other members in that group
