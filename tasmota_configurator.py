@@ -162,7 +162,7 @@ class TasmotaConfigurator:
                 , 'func': self.fetch_device_configs
             }, 'deploy': {
                 'desc': 'Deploy configuration(s) to the device(s) of your choice'
-                , 'func': self.multi_deploy
+                , 'func': self.deploy_devices
             }, 'command': {
                 'desc': 'Run a command against multiple devices at once'
                 , 'func': self.multi_command
@@ -221,7 +221,7 @@ class TasmotaConfigurator:
         self.print_device_list()
         idx = ""
         while True:
-            idx = self.input("Select a device, or enter 'done': " % cmd)
+            idx = self.input("Select a device, or enter 'done': ")
             if idx == 'done':
                 break
             # If the "all devices" option is picked, return all devices
@@ -291,7 +291,7 @@ class TasmotaConfigurator:
             logging.debug(" Request to %s failed after 10 seconds (retry=%s), retrying...", url, retry_count )
             return await self.webcommand( ip, command, retry_count+1 )
 
-    async def multi_deploy( self ):
+    async def deploy_devices( self ):
         tasks = []
         for d in self.get_device_selection():
             tasks.append( d.apply_config() )
@@ -337,26 +337,7 @@ class TasmotaConfigurator:
         if 'StatusNET' in status and 'Hostname' in status['StatusNET']:
             hostname = status['StatusNET']['Hostname']
         else: hostname = '(unknown)'
-        config_stub = """
-    {
-        "ip": "%s",
-        "enabled": false, /* Set this to true once configured */
-        "template_name": "", /* set this to a filename in the template_configs directory, without the .json extension */
-        "vars": {
-            "device_name": "%s",
-            "host_name": "%s",
-            "devgroup_name": "" /* Leave this blank if not using device groups */
-        },
-        "extra_grouptopics": [ /* (optional) Extra GroupTopics - See devices.jsonc.example for details. */
-            "office_lights"
-        ]
-        "rules": { 
-            /* (optional) Device-specific rules - See devices.jsonc.example for details. */
-        },
-        "config_overrides": { 
-            /* (optional) Device-specific configuration overrides - See devices.jsonc.example for details. */
-        }
-    } """ % ( ip, name, hostname )
+        config_stub = '\n\t{\n\t\t"ip": "%s",\n\t\t"enabled": false, /* Set this to true once configured */\n\t\t"template_name": "", /* set this to a filename in the template_configs directory, without the .json extension */\n\t\t"vars": {\n\t\t\t"device_name": "%s",\n\t\t\t"host_name": "%s",\n\t\t\t"devgroup_name": "" /* Leave this blank if not using device groups */\n\t\t},\n\t\t"extra_grouptopics": [ /* (optional) Extra GroupTopics - See devices.jsonc.example for details. */\n\t\t\t"office_lights"\n\t\t]\n\t\t"rules": {\n\t\t\t/* (optional) Device-specific rules - See devices.jsonc.example for details. */\n\t\t},\n\t\t"config_overrides": {\n\t\t\t/* (optional) Device-specific configuration overrides - See devices.jsonc.example for details. */\n\t\t}\n\t}' % ( ip, name, hostname )
         # Export the device's current configuration
         export = await self.export_config( ip )
 
