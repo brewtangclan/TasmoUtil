@@ -33,8 +33,16 @@ class Template:
     def __init__( self, client, template_path ):
         self.client = client
         self.name: str = os.path.splitext(os.path.basename(template_path))[0]
-        with open(template_path, 'r') as fp:
-            self.config = json.load(fp) 
+        try:
+            with open(template_path, 'r') as fp:
+                self.config = json.load(fp) 
+        except:
+            self.config = {}
+            logging.error("Error loading template %s:\n", template_path, exc_info=True)
+    
+    @property
+    def valid( self ):
+        return bool( self.config != {} )
             
 class Device:
     def __init__( self, client, deviceDict ):
@@ -47,6 +55,7 @@ class Device:
         self.hostname: str = self.vars.get("host_name")
         self.devgroup: str = self.vars.get("devgroup_name")
         self.rules: dict = deviceDict.get("rules", {})
+        self.extra_grouptopics: list = deviceDict.get("extra_grouptopics", [])
         self.overrides: dict = deviceDict.get('config_overrides', {})
         self.config: dict = {}
         self.config_filepath: str = None 
@@ -54,7 +63,7 @@ class Device:
     
     @property
     def valid( self ):
-        return bool( self.enabled and self.template is not None )
+        return bool( self.enabled and self.template is not None and self.template.valid )
 
     def generate_config( self ) -> bool:
         if not self.valid: return False
@@ -66,6 +75,16 @@ class Device:
         names = [ self.name ]
         while len(names) < len(config['friendlyname']): names.append("")
         config['friendlyname'] = names
+        # Merge any extra grouptopics into the template
+        if len(self.extra_grouptopics) > 0:
+            grouptopics = ( self.extra_grouptopics 
+                + [ self.template.config['mqtt_grptopic'] ] 
+                + self.template.config['mqtt_grptopic2'] )
+            config['mqtt_grptopic'] = grouptopics[0]
+            del grouptopics[0]
+            while len(grouptopics) > 3:
+                del grouptopics[-1]
+            config['mqtt_grptopic2'] = grouptopics
         # Enable and overwrite any rules defined at the device level
         for key in self.rules.keys():
             ruleIdx = int(key[-1])-1
@@ -97,6 +116,18 @@ class Device:
 
     async def is_online( self ) -> bool:
         return await self.client.host_online(self.ip)
+
+    async def query_devgroups( self ) -> dict:
+        retval = {'device': self, 'devgroups': [] }
+        retval['online'] = await self.is_online()
+        if not retval['online']: return retval
+        groupnames = await self.client.webcommand( self.ip, "DevGroupName")
+        for gn in groupnames.keys():
+            if groupnames[gn] != "":
+                devgroup = await self.client.webcommand( self.ip, gn.replace("Name", "Status"))
+                if 'DevGroupStatus' in devgroup: 
+                    retval['devgroups'].append( devgroup['DevGroupStatus'] )        
+        return retval        
     
 class TasmotaConfigurator:
     def __init__(self, **kwargs):
@@ -123,19 +154,21 @@ class TasmotaConfigurator:
         self.command_delay = kwargs.get("seconds_between_commands", 15)
 
         self.cmdline = {
-            'init': {
+            'scan': {
                 'desc': 'Scan your network for devices, fetch their current configurations, and pre-populate your devices.jsonc'
                 , 'func': self.scan_devices
-            },
-            'get-configs': {
+            }, 'backup': {
                 'desc': 'Fetch configurations for all devices listed in devices.jsonc using decode-config'
                 , 'func': self.fetch_device_configs
             }, 'deploy': {
                 'desc': 'Deploy configuration(s) to the device(s) of your choice'
                 , 'func': self.multi_deploy
-            }, 'deploy-all': {
-                'desc': 'Deploy configurations to all enabled devices in devices.jsonc'
-                , 'func': self.deploy_all
+            }, 'command': {
+                'desc': 'Run a command against multiple devices at once'
+                , 'func': self.multi_command
+            }, 'devgroups': {
+                'desc': 'Queries device group status for devices in devices.jsonc'
+                , 'func': self.query_devgroups
             }
         }
         asyncio.run( self.run() )
@@ -154,7 +187,6 @@ class TasmotaConfigurator:
         for switch in self.cmdline:
             print("%s %s\n\t%s" % ( os.path.basename(__file__), switch, self.cmdline[switch]['desc'] ) )
 
-
     def input( self, message: str ) -> str: 
         return input( "%s%s%s" % ( '\033[96m', message, '\033[0m' ) )    
 
@@ -169,6 +201,43 @@ class TasmotaConfigurator:
             if d.ip == ip and d.enabled:
                 return d
         return None
+
+    def print_device_list( self ):
+        indexes = []
+        for i in range(len(self.devices)):
+            indexes.append("[%s] %s (%s)" % ( i, self.devices[i].hostname, self.devices[i].ip))
+        indexes.append("[%s] All devices" % len(self.devices) )
+        data = indexes.copy()
+        if len(data)%2 > 0:
+            data.append("")
+        count = int(len(data)/2)
+        left = list(data[:count])
+        right = list(data[count:])
+        for i in range(count):
+            print( "%s%s" % (left[i].ljust(45, " "), right[i].ljust(45, " ") ) )
+
+    def get_device_selection( self ) -> List[Device]:
+        devices = []
+        self.print_device_list()
+        idx = ""
+        while True:
+            idx = self.input("Select a device, or enter 'done': " % cmd)
+            if idx == 'done':
+                break
+            # If the "all devices" option is picked, return all devices
+            if int(idx) == len(self.devices):
+                return self.devices
+            devices.append(self.devices[int(idx)])
+        return devices
+
+    def get_network_ip_selection( self ) -> list:
+        cidr = self.input("Enter the subnet of your Tasmota devices (e.g., '192.168.1.0/24'): ")
+        try:
+            net = ipaddress.IPv4Network(cidr)
+            return [str(ip) for ip in net]
+        except:
+            print("Invalid subnet, try again.")
+            return self.get_network_ip_selection()
 
     async def gather_tasks(self, *tasks):
         semaphore = asyncio.Semaphore(self.num_threads)
@@ -187,7 +256,7 @@ class TasmotaConfigurator:
 
     def host_online_synch( self, ip: str) -> bool:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1)
+        s.settimeout(3)
         try:
             s.connect((ip, 80))
             retval=True
@@ -223,23 +292,8 @@ class TasmotaConfigurator:
             return await self.webcommand( ip, command, retry_count+1 )
 
     async def multi_deploy( self ):
-        indexes = []
-        for i in range(len(self.devices)):
-            indexes.append("[%s] %s (%s)" % ( i, self.devices[i].hostname, self.devices[i].ip))
-        print("%s\n" % "\n".join(indexes))
         tasks = []
-        idx = ""
-        while True:
-            idx = self.input("Enter a device to deploy, or enter 'done': ")
-            if idx == 'done':
-                break
-            tasks.append(self.devices[int(idx)].apply_config() )
-        data = await self.gather_tasks(*tasks)
-        print(tabulate([x.values() for x in data], data[0].keys()))
-
-    async def deploy_all( self ):
-        tasks = []
-        for d in self.devices:
+        for d in self.get_device_selection():
             tasks.append( d.apply_config() )
         data = await self.gather_tasks(*tasks)
         print(tabulate([x.values() for x in data], data[0].keys()))
@@ -293,8 +347,11 @@ class TasmotaConfigurator:
             "host_name": "%s",
             "devgroup_name": "" /* Leave this blank if not using device groups */
         },
+        "extra_grouptopics": [ /* (optional) Extra GroupTopics - See devices.jsonc.example for details. */
+            "office_lights"
+        ]
         "rules": { 
-            /* (optional) Device-specific rules - See devices.jsonc for details. */
+            /* (optional) Device-specific rules - See devices.jsonc.example for details. */
         },
         "config_overrides": { 
             /* (optional) Device-specific configuration overrides - See devices.jsonc.example for details. */
@@ -312,14 +369,39 @@ class TasmotaConfigurator:
             , 'config_exported': export['success']
         }
 
+    async def scan_missing_devices( self ):
+        ips = self.get_network_ip_selection()
+        print("Scanning %s to %s..." % ( ips[0], ips[-1]))
+        tasks = []
+        for ip in ips:
+            tasks.append( self.scan_device( ip ) )
+        data = await self.gather_tasks(*tasks)
+        
+        for dev in list(data):
+            # Drop known devices from the list
+            if dev['ip'] in [x.ip for x in self.devices]:
+                data.remove(dev)
+            # Drop offline/non-Tasmota devices from the list
+            elif not dev['success']:
+                data.remove(dev)
+        if len(data) > 0:
+            # Sort by IP
+            data.sort(key = lambda x: [int(y) for y in x['ip'].split('.')] )
+            print("\nAdd to your devices.jsonc file:\n%s\n" % ",".join([x['config_stub'] for x in data]) )
+            for i in range(len(data)):
+                del data[i]['config_stub']
+            print(tabulate([x.values() for x in data], data[0].keys()))
+        else:
+            print("Scan did not find any new devices.")
+        return
+
     async def scan_devices( self ):
-        if len(self.devices) != 0:
-            print("Error: You already have data in your devices.jsonc file. Rename that file and run this again to scan.")
-            return
         self.max_retries = 1
-        cidr = self.input("Enter the subnet of your Tasmota devices (e.g., '192.168.1.0/24'): ")
-        net = ipaddress.IPv4Network(cidr)
-        ips = [str(ip) for ip in net]
+        if len(self.devices) != 0:
+            print("devices.jsonc is already populated. Scanning only for missing devices...")
+            await self.scan_missing_devices()
+            return        
+        ips = self.get_network_ip_selection()
         print("Scanning %s to %s..." % ( ips[0], ips[-1]))
         tasks = []
         for ip in ips:
@@ -340,6 +422,71 @@ class TasmotaConfigurator:
         
         print(tabulate([x.values() for x in data], data[0].keys()))
         return
+
+    async def query_devgroups( self ):
+        tasks = []
+        for d in self.devices:
+            tasks.append( d.query_devgroups() )
+        data = await self.gather_tasks(*tasks)
+        
+        devgroups = {}
+        for d in data:
+            if not d['online']: 
+                continue
+            for dg in d['devgroups']:
+                groupName = dg['GroupName']
+                if groupName not in devgroups.keys():
+                    devgroups[groupName] = { 'devices': {} }
+                ip = d['device'].ip
+                devgroups[groupName]['devices'][ip] = { "MessageSeq": dg['MessageSeq'], "Members": dg['Members'] }
+        results = []
+        for dgName in devgroups.keys():
+            devgroups[dgName]['mismatches'] = 0
+            deviceCount = len(devgroups[dgName]['devices'].keys())
+            for ip in devgroups[dgName]['devices'].keys():
+                deviceMemberCount = len(devgroups[dgName]['devices'][ip]['Members'])
+                if deviceMemberCount != deviceCount-1:
+                    devgroups[dgName]['mismatches'] += 1
+                    for ip in devgroups[dgName]['devices'].keys():
+                        if ip not in [ x['IPAddress'] for x in devgroups[dgName]['devices'][ip]['Members'] ]:
+                            if 'MissingMembers' not in devgroups[dgName]['devices'][ip]:
+                                devgroups[dgName]['devices'][ip]['MissingMembers'] = []
+                            devgroups[dgName]['devices'][ip]['MissingMembers'].append( ip )
+
+            results.append( {'Group': dgName, 'MemberCount': deviceCount, 'Mismatches': devgroups[dgName]['mismatches']})                    
+            for ip in devgroups[dgName]['devices'].keys():
+                d = devgroups[dgName]['devices'][ip]
+                if 'MissingMembers' in d.keys():
+                    for m in d['MissingMembers']:
+                        device = self.get_device( ip )
+                        missing = self.get_device( m )
+                        print("Group '%s': %s does not see %s." % ( dgName, device.hostname, missing.hostname ) )
+                    
+        print(tabulate([x.values() for x in results], results[0].keys()))        
+
+    async def multi_command_single( self, device: Device, cmd: str ) -> dict:
+        retval = { 'ip': device.ip, 'hostname': device.hostname }
+        if not await self.host_online( device.ip ):
+            print("Device %s (%s) is offline; skipping." % ( device.hostname, device.ip) )
+            return None
+        data = await self.webcommand( device.ip, cmd )
+        if isinstance(data, Exception):
+            print("Device %s (%s) did not respond to command '%s'; skipping." % ( device.hostname, device.ip, cmd))
+            return None
+        return merge(retval, data)
+
+    async def multi_command( self ):
+        cmd = self.input("Enter a command to run against one or more devices: ")
+        tasks = []
+        for d in self.get_device_selection():
+            tasks.append(self.multi_command_single( d, cmd ) )
+        print("Awaiting %s web command tasks..." % len(tasks))
+        data = await self.gather_tasks(*tasks)
+        for d in list(data):
+            if d is None:
+                data.remove(d)
+        print(tabulate([x.values() for x in data], data[0].keys()))
+
 
 if __name__ == '__main__':
     start = datetime.now()

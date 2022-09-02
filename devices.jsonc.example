@@ -18,6 +18,11 @@
             "devgroup_name": "office" /* Used as DevGroupName1, set to "" if not using device groups */
         },
 
+        /* (optional) Additional GroupTopics. Topics listed here will be prepended to those defined in the template. If this results in more than 4 grouptopics, those defined in the template will be skipped. */
+        "extra_grouptopics": [
+            "office_lights"
+        ],
+
         /* (optional) Device-specific rules. Any rules listed here will be merged into the template and enabled */
         "rules": {
             # Valid keys: Rule1, Rule2, Rule3
