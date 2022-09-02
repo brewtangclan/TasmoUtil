@@ -1,5 +1,5 @@
-# tasmota-config-generator
-A rudimentary tool to configure your Tasmota devices based on configurable templates.
+# TasmoUtil
+A rudimentary tool to configure your Tasmota devices based on configurable templates, and other assorted utilities.
 Uses https://github.com/tasmota/decode-config to export/import device configurations
 
 ## Setup:
