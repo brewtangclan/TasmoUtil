@@ -60,9 +60,9 @@ class Device:
         self.config: dict = {}
         self.config_filepath: str = None 
         self.generate_config()
-    
+
     @property
-    def valid( self ):
+    def valid( self ) -> bool:
         return bool( self.enabled and self.template is not None and self.template.valid )
 
     def generate_config( self ) -> bool:
@@ -72,6 +72,7 @@ class Device:
         config['device_group_topic'][0] = self.devgroup
         config['devicename'] = self.name
         config['hostname'] = self.hostname
+        config['mqtt_topic'] = self.hostname
         names = [ self.name ]
         while len(names) < len(config['friendlyname']): names.append("")
         config['friendlyname'] = names
@@ -102,17 +103,25 @@ class Device:
             json.dump( self.config, f, indent=4 )
         return True
 
-    async def apply_config( self ) -> dict:                
+    async def apply_config( self ) -> dict:   
+        retval = { "ip": self.ip, "hostname": self.hostname, "template": self.template.name }
+        if not await self.is_online():
+            retval['success'] = False
+            retval['details'] = 'Device is offline'
+            return retval
         if not await self.save_config(): 
-            return { "ip": self.ip, "hostname": self.hostname, "success": False, "details": "aborted - failed to save config" }
-        logging.info("Applying config JSON for %s to %s...", self.name, self.ip )
+            retval['success'] = False
+            retval['details'] = 'Aborted - failed to save config'
+            return retval
+        logging.info("Applying config JSON to %s (%s)...", self.ip, self.name )
         args = [ 'python3', 'decode-config.py', '--no-extension', '-s', self.ip, '--restore-file', self.config_filepath ]
         logging.debug("Executing: %s", " ".join(args))
         output = await self.client.run_blocking( subprocess.run, args, capture_output=True, text=True )
         output = output.stderr if output.stdout == '' else output.stdout        
         results = " ".join( output.split("\n")[1:])
-        success = bool( "Restore successful" in results )
-        return { "ip": self.ip, "hostname": self.hostname, "success": success, "details": results }
+        retval['success'] = bool( "Restore successful" in results )
+        retval['details'] = results
+        return retval
 
     async def is_online( self ) -> bool:
         return await self.client.host_online(self.ip)
@@ -132,7 +141,7 @@ class Device:
 class TasmoUtil:
     def __init__(self, **kwargs):
         self.args = kwargs.get("args")
-        self.listed_devices: list = kwargs.get("devices")        
+        self.listed_devices: List[Device] = kwargs.get("devices")        
         self.template_dir = os.path.join( os.getcwd(), "template_configs")
         self.device_dir = os.path.join( os.getcwd(), "device_configs")
         self.templates: List[Template] = []
@@ -172,7 +181,11 @@ class TasmoUtil:
             }
         }
         asyncio.run( self.run() )
-
+    
+    @property
+    def enabled_devices( self ) -> List[Device]:
+        return [x for x in self.devices if x.enabled]
+    
     async def run( self ):
         if len(self.args) == 1:
             await self.print_command_syntax("Missing argument.")
@@ -202,33 +215,36 @@ class TasmoUtil:
                 return d
         return None
 
-    def print_device_list( self ):
+    def print_device_list( self, enabled_only=False ):
         indexes = []
-        for i in range(len(self.devices)):
-            indexes.append("[%s] %s (%s)" % ( i, self.devices[i].hostname, self.devices[i].ip))
-        indexes.append("[%s] All devices" % len(self.devices) )
+        devices = self.enabled_devices if enabled_only else self.devices
+        for i in range(len(devices)):
+            indexes.append("[%s] %s (%s)" % ( i, devices[i].hostname, devices[i].ip))
+        indexes.append("[%s] All%s devices" % ( len(devices), " enabled" if enabled_only else "" ))
         data = indexes.copy()
         if len(data)%2 > 0:
             data.append("")
         count = int(len(data)/2)
         left = list(data[:count])
         right = list(data[count:])
+        print("%sDevices:" % "Enabled " if enabled_only else "")
         for i in range(count):
             print( "%s%s" % (left[i].ljust(45, " "), right[i].ljust(45, " ") ) )
 
-    def get_device_selection( self ) -> List[Device]:
-        devices = []
-        self.print_device_list()
+    def get_device_selection( self, enabled_only = False ) -> List[Device]:
+        devices = self.enabled_devices if enabled_only else self.devices
+        selected_devices = []
+        self.print_device_list(enabled_only = enabled_only)
         idx = ""
         while True:
             idx = self.input("Select a device, or enter 'done': ")
             if idx == 'done':
                 break
             # If the "all devices" option is picked, return all devices
-            if int(idx) == len(self.devices):
-                return self.devices
-            devices.append(self.devices[int(idx)])
-        return devices
+            if int(idx) == len(devices):
+                return self.enabled_devices if enabled_only else self.devices
+            selected_devices.append(devices[int(idx)])
+        return selected_devices
 
     def get_network_ip_selection( self ) -> list:
         cidr = self.input("Enter the subnet of your Tasmota devices (e.g., '192.168.1.0/24'): ")
@@ -293,7 +309,7 @@ class TasmoUtil:
 
     async def deploy_devices( self ):
         tasks = []
-        for d in self.get_device_selection():
+        for d in self.get_device_selection( enabled_only = True ):
             tasks.append( d.apply_config() )
         data = await self.gather_tasks(*tasks)
         print(tabulate([x.values() for x in data], data[0].keys()))
