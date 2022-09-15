@@ -20,7 +20,7 @@ logging.addLevelName(logging.ERROR, 'ERR')
 logging.addLevelName(logging.CRITICAL, 'CRIT')
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-file_handler = TimedRotatingFileHandler('tasmota_configurator.log', when="midnight", interval=1)
+file_handler = TimedRotatingFileHandler('_tasmoutil.log', when="midnight", interval=1)
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -90,7 +90,15 @@ class Device:
         for key in self.rules.keys():
             ruleIdx = int(key[-1])-1
             config['rule_enabled'][key] = 1
-            config['rules'][ruleIdx] = self.rules[key]        
+            config['rules'][ruleIdx] = self.rules[key] 
+
+        # Do find/replaces on the rules for each key in args in the device's jsonc config
+        for find in self.vars.keys():
+            replace = self.vars[find]
+            find = "||%s||" % find.upper()            
+            for ruleIdx in range(len(config['rules'])):
+                config['rules'][ruleIdx] = config['rules'][ruleIdx].replace(find, replace)
+
         # Merge the device's overrides into the config, and store the config
         self.config = merge({}, config, self.overrides )        
         return True
@@ -141,7 +149,10 @@ class Device:
 class TasmoUtil:
     def __init__(self, **kwargs):
         self.args = kwargs.get("args")
-        self.listed_devices: List[Device] = kwargs.get("devices")        
+        try:
+            self.listed_devices = JsoncParser.parse_file("./devices.jsonc")
+        except:
+            self.listed_devices = []
         self.template_dir = os.path.join( os.getcwd(), "template_configs")
         self.device_dir = os.path.join( os.getcwd(), "device_configs")
         self.templates: List[Template] = []
@@ -160,7 +171,7 @@ class TasmoUtil:
         self.upgrade_delay = kwargs.get("upgrade_delay", 60)
         self.max_retries = kwargs.get("max_retries", 5)
         self.num_threads = kwargs.get("num_threads", 4)
-        self.command_delay = kwargs.get("seconds_between_commands", 15)
+        self.command_delay = kwargs.get("seconds_between_commands", 0)
 
         self.cmdline = {
             'scan': {
@@ -178,6 +189,9 @@ class TasmoUtil:
             }, 'devgroups': {
                 'desc': 'Queries device group status for devices in devices.jsonc'
                 , 'func': self.query_devgroups
+            }, 'wifi': {
+                'desc': 'Fetches Wifi Status from the device(s) of your choice'
+                , 'func': self.wifi_scan
             }
         }
         asyncio.run( self.run() )
@@ -256,11 +270,15 @@ class TasmoUtil:
             return self.get_network_ip_selection()
 
     async def gather_tasks(self, *tasks):
+        start = datetime.now()
         semaphore = asyncio.Semaphore(self.num_threads)
         async def sem_task(task):
             async with semaphore:
                 return await task
-        return await asyncio.gather(*(sem_task(task) for task in tasks), return_exceptions=True)
+        data = await asyncio.gather(*(sem_task(task) for task in tasks), return_exceptions=True)
+        end = datetime.now()
+        print("Tasks completed in %s seconds." % (end-start).total_seconds())
+        return data
 
     async def run_blocking(self, blocking_func: typing.Callable, *args, **kwargs) -> typing.Any:
         """Runs a blocking function in a non-blocking way"""
@@ -371,15 +389,13 @@ class TasmoUtil:
         print("Scanning %s to %s..." % ( ips[0], ips[-1]))
         tasks = []
         for ip in ips:
-            tasks.append( self.scan_device( ip ) )
+            if ip not in [x.ip for x in self.devices]:
+                tasks.append( self.scan_device( ip ) )
         data = await self.gather_tasks(*tasks)
         
         for dev in list(data):
-            # Drop known devices from the list
-            if dev['ip'] in [x.ip for x in self.devices]:
-                data.remove(dev)
             # Drop offline/non-Tasmota devices from the list
-            elif not dev['success']:
+            if not dev['success']:
                 data.remove(dev)
         if len(data) > 0:
             # Sort by IP
@@ -444,11 +460,12 @@ class TasmoUtil:
                 deviceMemberCount = len(devgroups[dgName]['devices'][ip]['Members'])
                 if deviceMemberCount != deviceCount-1:
                     devgroups[dgName]['mismatches'] += 1
-                    for ip in devgroups[dgName]['devices'].keys():
-                        if ip not in [ x['IPAddress'] for x in devgroups[dgName]['devices'][ip]['Members'] ]:
+                    for peerIp in devgroups[dgName]['devices'].keys():
+                        members = [ x['IPAddress'] for x in devgroups[dgName]['devices'][ip]['Members'] ]
+                        if ip != peerIp and peerIp not in members:
                             if 'MissingMembers' not in devgroups[dgName]['devices'][ip]:
                                 devgroups[dgName]['devices'][ip]['MissingMembers'] = []
-                            devgroups[dgName]['devices'][ip]['MissingMembers'].append( ip )
+                            devgroups[dgName]['devices'][ip]['MissingMembers'].append( peerIp )
 
             results.append( {'Group': dgName, 'MemberCount': deviceCount, 'Mismatches': devgroups[dgName]['mismatches']})                    
             for ip in devgroups[dgName]['devices'].keys():
@@ -484,25 +501,48 @@ class TasmoUtil:
                 data.remove(d)
         print(tabulate([x.values() for x in data], data[0].keys()))
 
+    async def wifi_scan( self ):
+        tasks = []
+        for d in self.get_device_selection():
+            tasks.append(self.wifi_scan_single( d ) )
+        print("Awaiting Wifi Status from %s devices..." % len(tasks))
+        data = await self.gather_tasks(*tasks)
+        data = [ x for x in data if 'error' not in x.keys() ]
+        if len(data) > 0:
+            print(tabulate([x.values() for x in data], data[0].keys()))
+        else:
+            print("No data")
+
+    
+    async def wifi_scan_single( self, d: Device) -> dict:
+        retval = {'hostname': d.hostname, 'ip': d.ip}
+        if not await d.is_online():
+            retval['error'] = 'offline'
+            return retval
+        try:
+            status = await self.webcommand(d.ip, "Status 0")
+        except:
+            retval['error'] = traceback.format_exc()
+            return retval
+        retval['WifiConfig'] = status['StatusNET']['WifiConfig']
+        retval['Mac'] = status['StatusNET']['Mac']
+        retval['time'] = status['StatusSTS']['Time']
+        retval['SSId'] = status['StatusSTS']['Wifi']['SSId']
+        retval['BSSId'] = status['StatusSTS']['Wifi']['BSSId']
+        retval['Channel'] = status['StatusSTS']['Wifi']['Channel']
+        retval['RSSI'] = status['StatusSTS']['Wifi']['RSSI']
+        retval['Signal'] = status['StatusSTS']['Wifi']['Signal']
+        return retval
+
 
 if __name__ == '__main__':
-    start = datetime.now()
-    try:
-        devices = JsoncParser.parse_file("./devices.jsonc")
-    except:
-        devices = []
-
     TasmoUtil( 
-        devices = devices
-        , restart_delay = 10
+        restart_delay = 10
         , reset_delay = 15
         , upgrade_delay = 30
         , max_retries = 5
-        , num_threads = 32
+        , num_threads = 16
         , seconds_between_commands = 0
         , args = sys.argv
     )
-    
-    end = datetime.now()
-    print("Script completed in %s seconds." % (end-start).total_seconds())
         
